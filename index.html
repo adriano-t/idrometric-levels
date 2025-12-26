@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monitoraggio Live Alfonsine - Senio</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.2.1"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 15px; background-color: #f0f2f5; }
+        .container { margin: auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h1 { color: #1a3a5a; text-align: center; margin: 0 0 15px 0; font-size: 1.5em; }
+        
+        /* Nuova riga compatta */
+        .dashboard-header { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            flex-wrap: wrap; 
+            gap: 15px;
+            padding: 12px; 
+            border-radius: 8px; 
+            border-left: 6px solid #3498db; 
+            background: #f8f9fa;
+            margin-bottom: 15px;
+        }
+
+        .info-live { flex: 1; min-width: 300px; }
+        #lastUpdate { font-size: 1.2em; font-weight: bold; color: #2c3e50; }
+        .trend-badge { padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 1em; margin-left: 5px; }
+        .trend-up { background: #ffebee; color: #c62828; }
+        .trend-down { background: #e8f5e9; color: #2e7d32; }
+
+        .controls-row { display: flex; align-items: center; gap: 15px; }
+        .btn-group { display: flex; gap: 5px; }
+        .zoom-group { display: flex; align-items: center; gap: 8px; background: #eee; padding: 5px 12px; border-radius: 20px; font-size: 0.85em; color: #555; }
+        
+        button { padding: 8px 12px; cursor: pointer; border: none; border-radius: 5px; background-color: #3498db; color: white; font-weight: bold; font-size: 0.85em; transition: 0.2s; }
+        button.active { background-color: #1a3a5a; }
+        button:hover { opacity: 0.9; }
+
+        .chart-wrapper { 
+            width: 100%; 
+            overflow-x: auto; 
+            border: 1px solid #ddd; 
+            border-radius: 8px; 
+            cursor: grab;
+            user-select: none;
+            background: white;
+        }
+        .chart-wrapper:active { cursor: grabbing; }
+        .chart-area { height: 72vh; min-height: 500px; margin: 0 auto;}
+        .chart-container { height: 62%; width: 100%; }
+        .delta-container { height: 38%; width: 100%; border-top: 1px dashed #ccc; }
+        
+        input[type=range] { cursor: pointer; width: 80px; }
+
+        /* Stile compatto per gli indicatori */
+        .indicators-row {
+            display: flex;
+            gap: 15px;
+            font-size: 0.85em;
+            margin-top: 5px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .indicator-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            color: #555;
+        }
+        .soglia-alert {
+            color: #972404;
+            font-weight: bold;
+        }
+        .pluvio-val {
+            color: #0277bd;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Alfonsine - Fiume Senio</h1>
+
+    <div class="dashboard-header">
+        <div id="status" class="info-live">Caricamento dati...</div>
+        
+        <div class="controls-row">
+            <div class="zoom-group">
+                <span>Zoom:</span>
+                <input type="range" id="zoomSlider" min="8" max="40" value="14" oninput="adjustZoom()">
+                <span id="zoomVal">14px</span>
+            </div>
+            <div class="btn-group">
+                <button onclick="updateView(48, this)" id="btnDefault">48h</button>
+                <button onclick="updateView(24, this)">24h</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="chart-wrapper">
+        <div class="chart-area" id="chartParent">
+            <div class="chart-container">
+                <canvas id="idroChart"></canvas>
+            </div>
+            <div class="delta-container">
+                <canvas id="deltaChart"></canvas>
+            </div>
+        </div>
+    </div>
+    <p style="text-align:right; color:#7f8c8d; font-size:0.75em; margin-top:8px;">Aggiornamento: ogni 5 min | Trascina per scorrere</p>
+</div>
+
+<script>
+let globalData = []; 
+let globalSoglie = [];
+let currentHours = 48;
+let myChart = null;
+let myDeltaChart = null;
+
+async function fetchData() {
+    const url = `https://apps.arpae.it/REST/meteo_osservati/3137`;
+    try {
+        const response = await fetch(url);
+        const alfonsine = await response.json();
+        if (!alfonsine || !alfonsine.dati) return;
+
+        globalSoglie = alfonsine.anagrafica.sensori.livello_idro.soglie;
+        globalData = [];
+        let lastDate = "";
+
+        const sortedDates = Object.keys(alfonsine.dati).sort();
+        sortedDates.forEach(dateStr => {
+            const formattedDay = `${dateStr.substring(6,8)}/${dateStr.substring(4,6)}`;
+            const orari = Object.keys(alfonsine.dati[dateStr]).sort();
+            
+            orari.forEach(ora => {
+                const val = alfonsine.dati[dateStr][ora].livello_idro;
+                if (val !== null && val !== undefined) {
+                    let isNewDay = (dateStr !== lastDate);
+                    if (isNewDay) lastDate = dateStr;
+                    globalData.push({
+                        label: ora === "0000" || isNewDay ? formattedDay + " " + ora.substring(0,2)+":"+ora.substring(2) : `${ora.substring(0,2)}:${ora.substring(2)}`,
+                        isMidnight: isNewDay,
+                        valore: val
+                    });
+                }
+            });
+        });
+
+        const activeBtn = document.querySelector('button.active') || document.getElementById('btnDefault');
+        updateView(currentHours, activeBtn);
+    } catch (error) {
+        document.getElementById('status').innerText = "Errore Arpae.";
+    }
+}
+
+function adjustZoom() {
+    const slider = document.getElementById('zoomSlider');
+    document.getElementById('zoomVal').innerText = slider.value + "px";
+    updateView(currentHours);
+}
+
+function updateView(hours, element) {
+    currentHours = hours;
+    if (element) {
+        document.querySelectorAll('.btn-group button').forEach(btn => btn.classList.remove('active'));
+        element.classList.add('active');
+    }
+
+    let filteredPoints = [...globalData];
+    if (hours > 0) filteredPoints = globalData.slice(-Math.round(hours * 2.1)); 
+
+    const pixelPerPunto = parseInt(document.getElementById('zoomSlider').value);
+    document.getElementById('chartParent').style.width = (filteredPoints.length * pixelPerPunto) + "px";
+
+    const labels = filteredPoints.map(p => p.label);
+    const livelli = filteredPoints.map(p => p.valore);
+    const deltas = livelli.map((val, i) => i === 0 ? 0 : parseFloat((val - livelli[i-1]).toFixed(2)));
+
+    renderCharts(labels, livelli, deltas, filteredPoints);
+    updateStatusLabel();
+    
+    setTimeout(() => {
+        document.querySelector('.chart-wrapper').scrollLeft = 100000;
+    }, 100);
+}
+
+async function fetchPioggiaMonte() {
+    // Stazione 5563 - Casola valsenio (Pluviometro)
+    const url = `https://apps.arpae.it/REST/meteo_osservati/5563`;
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
+        if (!data || !data.dati) return;
+
+        let sommaPioggia = 0;
+        const sortedDates = Object.keys(data.dati).sort().reverse();
+        
+        // Prendiamo le ultime 6 ore di dati
+        let count = 0;
+        for (let d of sortedDates) {
+            const orari = Object.keys(data.dati[d]).sort().reverse();
+            for (let o of orari) {
+                if (count < 12) { // 12 rilevazioni da 30 min = 6 ore
+                    sommaPioggia += data.dati[d][o].pioggia || 0;
+                    count++;
+                }
+            }
+        }
+        document.getElementById('pluvioDato').innerText = sommaPioggia.toFixed(1) + " mm";
+    } catch (e) {
+        document.getElementById('pluvioDato').innerText = "N.D.";
+    }
+}
+
+function updateStatusLabel() {
+    const ultimo = globalData[globalData.length - 1];
+    const precedente = globalData[globalData.length - 3] || globalData[globalData.length - 2];
+    const diff = (ultimo.valore - precedente.valore).toFixed(2);
+    const trendClass = diff > 0 ? 'trend-up' : (diff < 0 ? 'trend-down' : '');
+    const trendSign = diff > 0 ? '+' : '';
+    const trendLabel = diff > 0 ? 'Crescita' : (diff < 0 ? 'Decrescita' : 'Stabile');
+
+    // Calcolo distanza dalla soglia 3 (Rossa) in modo compatto
+    let sogliaInfo = "";
+    if (globalSoglie && globalSoglie[2]) {
+        const distRossa = (globalSoglie[2] - ultimo.valore).toFixed(2);
+        if (distRossa > 0) {
+            sogliaInfo = `<span class="soglia-alert">Mancano ${distRossa}m alla Soglia Rossa</span>`;
+        } else {
+            sogliaInfo = `<span class="soglia-alert" style="color:#c62828;">Soglia Rossa superata di ${Math.abs(distRossa).toFixed(2)}m</span>`;
+        }
+    }
+
+    document.getElementById('status').innerHTML = `
+        <div style="display: flex; align-items: baseline; gap: 10px;">
+            <span id="lastUpdate">Attualmente ${ultimo.valore} m</span> 
+            <span class="trend-badge ${trendClass}">${trendLabel} ${trendSign}${diff} m/h</span>
+            ${sogliaInfo}
+        </div>
+        <div class="indicators-row">
+            <span class="indicator-item">🕒 ${ultimo.label}</span>
+            <span class="indicator-item">📍 Pioggia a Casola Valsenio ultima ora: <span id="pluvioDato" class="pluvio-val">...</span></span>
+        </div>
+        <div style="font-size: 0.75em; color: #555; margin-top: 2px;">
+            Soglie: ${globalSoglie[0]} / ${globalSoglie[1]} / ${globalSoglie[2]}
+        </div>
+    `;
+    
+    fetchPioggiaMonte();
+}
+
+function renderCharts(labels, livelli, deltas, pointsObjects) {
+    const commonOptions = {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: {
+                ticks: {
+                    autoSkip: false,
+                    maxRotation: 0,
+                    font: { size: 10 },
+                    callback: function(val, index) {
+                        const label = this.getLabelForValue(val);
+                        return (label.includes(':00') || label.includes('/')) ? label.replace(':00', '') : '';
+                    }
+                }
+            }
+        }
+    };
+
+    // 1. Grafico Livello
+    if (myChart) myChart.destroy();
+    myChart = new Chart(document.getElementById('idroChart').getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                data: livelli,
+                borderColor: '#2980b9',
+                backgroundColor: 'rgba(41, 128, 185, 0.1)',
+                fill: true,
+                pointRadius: 4,
+                tension: 0.15
+            }]
+        },
+        options: {
+            ...commonOptions,
+            scales: {
+                ...commonOptions.scales,
+                y: { 
+                    position: 'right', 
+                    min: Math.min(...livelli) - 1.5, 
+                    max: Math.max(...livelli, globalSoglie[2]) + 1.5,
+                    ticks: {
+                        // ARROTONDAMENTO A 2 DECIMALI + m
+                        callback: function(value) { return +value.toFixed(2) + 'm'; },
+                        font: { weight: 'bold' }
+                    }
+                }
+            },
+            plugins: {
+                ...commonOptions.plugins,
+                annotation: {
+                    annotations: {
+                        s1: { 
+                            type: 'line', 
+                            yMin: globalSoglie[0], 
+                            yMax: globalSoglie[0], 
+                            borderColor: 'green', 
+                            borderDash: [5,5],
+                            label: {
+                                display: true,
+                                content: globalSoglie[0].toFixed(2),
+                                position: 'start', // Lo mette a sinistra
+                                backgroundColor: 'rgba(0, 128, 0, 0.8)',
+                                color: 'white',
+                                font: { size: 10, weight: 'bold' },
+                                yAdjust: -10 // Sposta l'etichetta leggermente sopra la linea
+                            }
+                        },
+                        s2: { 
+                            type: 'line', 
+                            yMin: globalSoglie[1], 
+                            yMax: globalSoglie[1], 
+                            borderColor: 'orange', 
+                            borderDash: [5,5],
+                            label: {
+                                display: true,
+                                content: globalSoglie[1].toFixed(2),
+                                position: 'start',
+                                backgroundColor: 'rgba(255, 165, 0, 0.8)',
+                                color: 'white',
+                                font: { size: 10, weight: 'bold' },
+                                yAdjust: -10
+                            }
+                        },
+                        s3: { 
+                            type: 'line', 
+                            yMin: globalSoglie[2], 
+                            yMax: globalSoglie[2], 
+                            borderColor: 'red', 
+                            borderDash: [5,5],
+                            label: {
+                                display: true,
+                                content: globalSoglie[2].toFixed(2),
+                                position: 'start',
+                                backgroundColor: 'rgba(255, 0, 0, 0.8)',
+                                color: 'white',
+                                font: { size: 11, weight: 'bold' },
+                                yAdjust: -10
+                            }
+                        }
+                    }
+                },
+                title: {
+                    display: true,
+                    text: `Livello Idrometrico`,
+                    color: '#1a3a5a',
+                    font: { size: 20, weight: 'bold' },
+                    padding: { top: 5, bottom: 0 }
+                }
+            }
+        }
+    });
+
+    // 2. Grafico Variazione (Derivata)
+    if (myDeltaChart) myDeltaChart.destroy();
+    myDeltaChart = new Chart(document.getElementById('deltaChart').getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                data: deltas,
+                backgroundColor: deltas.map(v => v >= 0 ? 'rgba(198, 40, 40, 0.6)' : 'rgba(46, 125, 50, 0.6)'),
+                borderColor: deltas.map(v => v >= 0 ? '#c62828' : '#2e7d32'),
+                borderWidth: 1
+            }]
+        },
+        options: {
+            ...commonOptions,
+            scales: {
+                ...commonOptions.scales,
+                y: { 
+                    position: 'right',
+                    ticks: {
+                        // VALORE IN CM (Arrotondato a intero per pulizia)
+                        callback: function(value) { return (value * 100).toFixed(0) + 'cm'; }
+                    }
+                }
+            },
+            plugins: {
+                ...commonOptions.plugins,
+                title: {
+                    display: true,
+                    text: `Variazione (${currentHours}h)`,
+                    color: '#1a3a5a',
+                    font: { size: 20, weight: 'bold' },
+                    padding: { top: 5, bottom: 0 }
+                }
+            }
+        }
+    });
+}
+
+// Drag-to-Scroll
+const scrollContainer = document.querySelector('.chart-wrapper');
+let isDown = false; let startX; let scrollLeft;
+scrollContainer.addEventListener('mousedown', (e) => {
+    isDown = true; startX = e.pageX - scrollContainer.offsetLeft; scrollLeft = scrollContainer.scrollLeft;
+});
+scrollContainer.addEventListener('mouseleave', () => isDown = false);
+scrollContainer.addEventListener('mouseup', () => isDown = false);
+scrollContainer.addEventListener('mousemove', (e) => {
+    if (!isDown) return;
+    e.preventDefault();
+    const x = e.pageX - scrollContainer.offsetLeft;
+    scrollContainer.scrollLeft = scrollLeft - (x - startX) * 2;
+});
+
+fetchData();
+setInterval(fetchData, 5 * 60 * 1000); 
+</script>
+</body>
+</html>
